@@ -22,9 +22,8 @@ DEFAULT_SSH_TIMEOUT = 3
 DEFAULT_CMD_TIMEOUT = 10
 
 # Default server file
-DEFAULT_SERVER_FILE = 'servers.txt'
-SERVER_FILE_PATH = os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])),
-                                DEFAULT_SERVER_FILE)
+
+SERVER_FILE_PATH = '/Users/asuka/.ssh/config'
 
 parser = argparse.ArgumentParser(description='Check state of GPU servers')
 parser.add_argument('-v', '--verbose', action='store_true',
@@ -35,7 +34,7 @@ parser.add_argument('-f', '--finger', action='store_true',
 parser.add_argument('-m', '--me', action='store_true',
                     help='Show only GPUs used by current user')
 parser.add_argument('-u', '--user', help='Shows only GPUs used by a user')
-parser.add_argument('-s', '--ssh-user', default=None,
+parser.add_argument('-s', '--ssh-user', default=[],
                     help='Username to use to connect with SSH')
 parser.add_argument('--ssh-timeout', default=DEFAULT_SSH_TIMEOUT,
                     help='Timeout in seconds after which SSH stops to connect')
@@ -48,7 +47,7 @@ parser.add_argument('servers', nargs='*', default=[],
                     help='Servers to probe')
 
 # SSH command
-SSH_CMD = ('ssh -o "ConnectTimeout={ssh_timeout}" {server} '
+SSH_CMD = ('ssh -i {IdentityFile} -o "ConnectTimeout={ssh_timeout}" {server} '
            'timeout {cmd_timeout}')
 
 # Command for running nvidia-smi locally
@@ -101,10 +100,12 @@ def run_nvidiasmi_local():
     return ET.fromstring(res) if res is not None else None
 
 
-def run_nvidiasmi_remote(server, ssh_timeout, cmd_timeout):
+def run_nvidiasmi_remote(server, ssh_timeout, cmd_timeout,IdentityFile):
     cmd = REMOTE_NVIDIASMI_CMD.format(server=server,
                                       ssh_timeout=ssh_timeout,
+                                      IdentityFile=IdentityFile,
                                       cmd_timeout=cmd_timeout)
+    print(cmd)
     res = run_command(cmd)
     return ET.fromstring(res) if res is not None else None
 
@@ -115,8 +116,9 @@ def run_ps_local(pids):
     return res.decode('ascii') if res is not None else None
 
 
-def run_ps_remote(server, pids, ssh_timeout, cmd_timeout):
+def run_ps_remote(server, pids, ssh_timeout, cmd_timeout,IdentityFile):
     cmd = REMOTE_PS_CMD.format(server=server,
+                               IdentityFile=IdentityFile,
                                pids=','.join(pids),
                                ssh_timeout=ssh_timeout,
                                cmd_timeout=cmd_timeout)
@@ -228,15 +230,22 @@ def main(argv):
     logging.basicConfig(format='%(message)s',
                         level=logging.DEBUG if args.verbose else logging.INFO)
 
+
+    ifiles = []
+    fServer = []
+
     if len(args.servers) == 0:
-        try:
-            debug('Using server file {}'.format(args.server_file))
-            with open(args.server_file, 'r') as f:
-                servers = (s.strip() for s in f.readlines())
-                args.servers = [s for s in servers if s != '']
-        except OSError as e:
-            error('Could not open server file {}'.format(args.server_file))
-            return
+        debug('Using server file {}'.format(args.server_file))
+        with open(SERVER_FILE_PATH,'r') as f:
+            for line in f.readlines():
+                if 'HostName' in line:
+                    args.servers.append(line.split(' ')[1].strip())
+                if 'User ' in line:
+                    args.ssh_user.append(line.split(' ')[1].strip())
+                if 'IdentityFile' in line:
+                    ifiles.append(line.split(' ')[1].strip())
+                if '---' in line:
+                    break
 
     if len(args.servers) == 0:
         error(('No GPU servers to connect to specified.\nPut addresses in '
@@ -244,8 +253,9 @@ def main(argv):
         return
 
     if args.ssh_user is not None:
-        args.servers = ['{}@{}'.format(args.ssh_user, server)
-                        for server in args.servers]
+        for i in range(len(args.ssh_user)):
+            fServer.append(('{}@{}'.format(args.ssh_user[i], args.servers[i]), ifiles[i]))
+
     if args.me:
         if args.ssh_user is not None:
             args.user = args.ssh_user
@@ -254,21 +264,24 @@ def main(argv):
     if args.user or args.finger:
         args.list = True
 
-    for server in args.servers:
+    for server,IdentityFile in fServer:
         if server == '.' or server == 'localhost' or server == '127.0.0.1':
             run_nvidiasmi = run_nvidiasmi_local
             run_ps = run_ps_local
             run_get_real_names = get_real_names_local
         else:
             run_nvidiasmi = partial(run_nvidiasmi_remote,
+                                    IdentityFile=IdentityFile,
                                     server=server,
                                     ssh_timeout=args.ssh_timeout,
                                     cmd_timeout=args.cmd_timeout)
             run_ps = partial(run_ps_remote,
                              server=server,
+                             IdentityFile=IdentityFile,
                              ssh_timeout=args.ssh_timeout,
                              cmd_timeout=args.cmd_timeout)
             run_get_real_names = partial(get_real_names_remote,
+                                         IdentityFile=IdentityFile,
                                          server=server,
                                          ssh_timeout=args.ssh_timeout,
                                          cmd_timeout=args.cmd_timeout)
